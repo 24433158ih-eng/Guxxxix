@@ -18,11 +18,17 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
+import requests # Synchronous requests imported here as well for backwards compatibility
 
 load_dotenv()
 
+# --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")      # BotFather token
+# Note: Render uses strings for ENV. Convert to int here.
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # আপনার টেলিগ্রাম আইডি (admin)
+if BOT_TOKEN is None:
+    logging.error("BOT_TOKEN is not set in environment variables.")
+    raise ValueError("BOT_TOKEN is missing")
 
 # টেলিগ্রাম বড় ফাইল লিমিট (প্রাসঙ্গিক নাও হতে পারে)
 TELEGRAM_MAX_FILESIZE = 50 * 1024 * 1024  # 50 MB (approx)
@@ -371,7 +377,6 @@ async def verify_videos_from_links(links, concurrency=MAX_CONCURRENT_REQUESTS):
     return uniq(verified)
 
 # ----------------- Backwards-compatible synchronous fetch (preserved) -----------------
-import requests
 def fetch_and_parse(url):
     headers = {"User-Agent": USER_AGENT}
     r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
@@ -394,7 +399,9 @@ async def fetch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     msg = await update.message.reply_text(f"🌐 single-page স্ক্যান চলছে: `{url}`...", parse_mode='Markdown')
     try:
-        html_text, final_url = fetch_and_parse(url)
+        # Synchronous fetch here (original code)
+        html_text, final_url = await asyncio.to_thread(fetch_and_parse, url)
+        
         all_links = extract_all_video_links_from_html(html_text, final_url)
         # verify automatically for single-page too
         verified = []
@@ -490,18 +497,4 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         vids = rec.get("verified_videos", [])
-        source_url = rec.get("url", "")
-
-        if not vids:
-            await q.message.reply_text(f"কোন ভিডিও মিলেনি\nSource: `{source_url}`", parse_mode='Markdown')
-            return
-
-        # Build numbered lines
-        lines = []
-        for i, v in enumerate(vids, start=1):
-            lines.append(f"{i}. {v}")
-
-        chunks = chunk_text_lines(lines)  # split if too long
-
-        sent_ids = []
-      
+        source_url = rec.get("url"
