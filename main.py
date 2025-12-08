@@ -1,112 +1,313 @@
-# main.py - Deep Site Crawl + Auto-Verify Video + Persistent Video-List Button + Deletable Link-Lists
-# Updated for Imran (Buttons never auto-delete; bot verifies links before showing; old functions preserved)
+main.py - Final Modified Media Extractor Bot (Video/Embed Only, No Blocking)
+
 import os
 import re
 import json
 import logging
 import asyncio
-import time
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse
 
-import aiohttp
-import async_timeout
+import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters
+ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
+ContextTypes, filters
 )
-import requests # Synchronous requests imported here as well for backwards compatibility
 
 load_dotenv()
 
-# --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")      # BotFather token
-# Note: Render uses strings for ENV. Convert to int here.
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # আপনার টেলিগ্রাম আইডি (admin)
-if BOT_TOKEN is None:
-    logging.error("BOT_TOKEN is not set in environment variables.")
-    # Production environment check - useful for Render
-    # raise ValueError("BOT_TOKEN is missing") 
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # তোমার টেলিগ্রাম আইডি (admin)
 
-# টেলিগ্রাম বড় ফাইল লিমিট (প্রাসঙ্গিক নাও হতে পারে)
+সতর্কতা: টেলিগ্রামের|max file size| তথ্য পরিবর্তিত হতে পারে — বড় ভিডিও লিংক পাঠাও
+
 TELEGRAM_MAX_FILESIZE = 50 * 1024 * 1024  # 50 MB (approx)
 USER_AGENT = "Mozilla/5.0 (compatible; Bot/1.0; FinalVideoExtractor)"
 
-# Simple in-memory storage for results (Replacing DB/File storage)
-# Format:
-# { cache_id: {
-#      "url": start_url,
-#      "links": [all found links],
-#      "verified_videos": [only verified video links],
-#      "meta": {...},
-#      "list_message_ids": [message ids of sent numbered lists]  # used for delete
-#   }
-# }
+Simple in-memory storage for results (Replacing DB/File storage)
+
+Format: {cache_id: {"url": "...", "videos": [...]}}
+
 RESULTS_CACHE = {}
 CACHE_COUNTER = 1
 
-# Crawl defaults (tuneable)
-MAX_PAGES = 2000
-MAX_CONCURRENT_REQUESTS = 15
-MAX_DEPTH = 6
-REQUEST_TIMEOUT = 20
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(name)
 
-# ----------------- Utility & Cache -----------------
+--- Utility & Cache Functions ---
+
 def get_unique_cache_id():
-    global CACHE_COUNTER
-    CACHE_COUNTER += 1
-    return CACHE_COUNTER - 1
+"""Generates a unique ID for cache storage."""
+global CACHE_COUNTER
+CACHE_COUNTER += 1
+return CACHE_COUNTER - 1
 
-def save_to_cache(url, links, verified=None, meta=None):
-    cache_id = get_unique_cache_id()
-    RESULTS_CACHE[cache_id] = {
-        "url": url,
-        "links": links,
-        "verified_videos": verified or [],
-        "meta": meta or {},
-        "list_message_ids": []
-    }
-    return cache_id
+def save_to_cache(url, video_links):
+"""Saves results to cache and returns a unique ID."""
+cache_id = get_unique_cache_id()
+RESULTS_CACHE[cache_id] = {"url": url, "videos": video_links}
+return cache_id
 
 def load_from_cache(cache_id):
-    return RESULTS_CACHE.get(cache_id)
+"""Loads results from cache by ID."""
+return RESULTS_CACHE.get(cache_id)
 
 def is_absolute(url):
-    try:
-        return bool(urlparse(url).netloc)
-    except:
-        return False
+try:
+return bool(urlparse(url).netloc)
+except:
+return False
 
 def make_abs(link, base):
-    if not link:
-        return None
-    try:
-        joined = urljoin(base, link)
-        clean, _ = urldefrag(joined)
-        return clean.strip()
-    except:
-        return None
+if not link: return None
+try:
+return urljoin(base, link).strip()
+except:
+return None
 
 def is_video_link(url):
-    if not isinstance(url, str):
-        return False
-    url_lower = url.lower().split('?')[0].split('#')[0]
-    if re.search(r'\.(mp4|webm|mov|mkv|avi|flv|m3u8|ts|mpd|ogg|ogv|vtt)$', url_lower):
-        return True
-    if re.search(r'(\.m3u8\b|/hls/|/dash/|/manifest\.mpd\b)', url_lower):
-        return True
-    return False
+"""Checks if a URL has common video file extensions."""
+if not isinstance(url, str): return False
+# Use split to ignore query parameters like ?m=1
+url = url.lower().split('?')[0].split('#')[0]
+if re.search(r'.(mp4|webm|mov|mkv|avi|flv|m3u8|ts|mpd|ogg|ogv|vtt)$', url):
+return True
+return False
 
 def uniq(seq):
-    seen = set()
-    out = []
-    for x in seq:
+"""Returns unique elements while preserving order."""
+seen = set()
+out = []
+for x in seq:
+if x and x not in seen:
+seen.add(x)
+out.append(x)
+return out
+
+--- Network & Parsing ---
+
+async def fetch_and_parse(url):
+"""Fetches a URL and returns the text content and final URL."""
+headers = {"User-Agent": USER_AGENT}
+# Using requests synchronously within an async environment
+r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+r.raise_for_status()
+return r.text, r.url
+
+def extract_all_video_links(html_text, base_url):
+"""
+Extracts all requested video links from HTML, including direct links and iframes.
+"""
+soup = BeautifulSoup(html_text, "lxml")
+found_links = []
+
+# --- 1. Requested Tags and Attributes ---  
+tags_and_attrs = {  
+    "video": ["src"],  
+    "source": ["src"],  
+    "embed": ["src"],  
+    "object": ["data"],  
+    "track": ["src"],  
+    "a": ["href"], # Filtered later for video extensions  
+    "iframe": ["src"], # Filtered later  
+    # The first code also looked for <video src> and <source src> which are included here  
+}  
+
+for tag_name, attrs in tags_and_attrs.items():  
+    for tag in soup.find_all(tag_name):  
+        for attr in attrs:  
+            link = tag.get(attr)  
+            if link:  
+                abs_link = make_abs(link, base_url)  
+                  
+                if tag_name == "a":  
+                    # Only include <a> tags that link directly to a video file  
+                    if is_video_link(abs_link):  
+                         found_links.append(abs_link)  
+                elif tag_name == "iframe":  
+                    # Add all iframes (embeds), as requested by the original code logic  
+                    found_links.append(abs_link)  
+                else:  
+                    # Include direct video tags  
+                    found_links.append(abs_link)  
+
+
+# --- 2. Metadata: Open Graph (og:video) ---  
+for meta in soup.find_all("meta"):  
+    prop = meta.get("property")  
+    content = meta.get("content")  
+    if prop and content:  
+        if prop in ["og:video", "og:video:url", "og:video:secure_url"]:  
+            found_links.append(make_abs(content, base_url))  
+              
+# --- 3. Heuristic/JS Patterns ---  
+# Search for common video link patterns in the whole HTML text  
+video_link_pattern = r'(https?://[^\s\'"]*?\.(mp4|webm|mov|mkv|avi|flv|m3u8|ts|mpd|ogg|ogv|vtt))'  
+  
+# Search for generic variable assignments (e.g., "file": "...", video_url = "...")  
+generic_url_pattern = r'["\'](file|src|contentUrl|streamUrl)["\']\s*:\s*["\'](https?://[^\s\'"]+?)(["\'])'  
+  
+all_text = html_text   
+  
+# Search for direct video files embedded in JS/text  
+for match in re.finditer(video_link_pattern, all_text, re.IGNORECASE):  
+    potential_link = match.group(0).strip()  
+    if len(potential_link) > 10 and is_absolute(potential_link):  
+        found_links.append(potential_link)  
+          
+# Search for generic URL patterns   
+for match in re.finditer(generic_url_pattern, all_text):  
+    potential_link = match.group(2).strip()  
+    if len(potential_link) > 10 and is_absolute(potential_link):  
+         # Only add if it looks like a video link or a generic URL (like a stream link)  
+         if is_video_link(potential_link) or re.search(r'\b(stream|video|cdn)\b', potential_link, re.IGNORECASE):  
+            found_links.append(potential_link)  
+  
+# --- Final Cleanup ---  
+all_media_links = uniq(found_links)  
+  
+# Remove any None values from the list  
+all_media_links = [link for link in all_media_links if link]  
+  
+return all_media_links
+
+--- Telegram Handlers ---
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.message.reply_text("👋 হাই — যেকোনো Blogger/ওয়েবসাইট লিংক পাঠান। আমি ভিডিও/এমবেড লিংক খুঁজে বের করব এবং ফলাফল দেবো।")
+
+async def fetch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# usage: /fetch <url>
+if not context.args:
+await update.message.reply_text("ব্যবহার করুন: /fetch <blog_post_url>")
+return
+
+url = context.args[0].strip()  
+  
+# --- Deletion System (from 2nd code) ---  
+try:  
+    # Delete user's message  
+    await update.message.delete()  
+except Exception as e:  
+    logger.warning(f"Failed to delete user message: {e}")  
+
+msg = await update.message.reply_text(f"🌐 স্ক্যান করা হচ্ছে: `{url}`...", parse_mode='Markdown')  
+  
+try:  
+    html_text, final_url = await fetch_and_parse(url)  
+    all_links = extract_all_video_links(html_text, final_url)  
+
+    total_links = len(all_links)  
+      
+    # Save to cache  
+    cache_id = save_to_cache(final_url, all_links)  
+
+    # --- Inline Button Logic (from 2nd code) ---  
+    summary = f"✅ স্ক্যান শেষ\nSource: `{final_url}`\n\nমোট ভিডিও/এমবেড: **{total_links}**"  
+      
+    keyboard = [  
+        [InlineKeyboardButton("🎞️ ভিডিও লিস্ট দেখুন", callback_data=f"show_videos:{cache_id}")]  
+    ]  
+    reply_markup = InlineKeyboardMarkup(keyboard)  
+
+    await msg.edit_text(summary, reply_markup=reply_markup, parse_mode='Markdown')  
+
+    # --- Admin Notification (Simplified from 1st code) ---  
+    if ADMIN_CHAT_ID:  
+        # Send the URL and summary to the admin  
+        await context.bot.send_message(  
+            chat_id=ADMIN_CHAT_ID,   
+            text=f"Fetched URL: {final_url}\nFound {total_links} video/embed links. Sent list to user."  
+        )  
+        # Send the first few direct video links to admin (optional, for checking)  
+        direct_videos = [v for v in all_links if is_video_link(v)]  
+        for i, v_url in enumerate(direct_videos[:5]): # Send max 5 direct links  
+             await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"[Direct Video File Link] {v_url}")  
+          
+
+except Exception as e:  
+    logger.exception(e)  
+    await msg.edit_text(f"❌ সমস্যা: {str(e)}")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+"""Handles the 'Show Videos' button click."""
+q = update.callback_query
+data = q.data or ""
+await q.answer() # Acknowledge the query
+
+if data.startswith("show_videos:"):  
+    _, sid = data.split(":",1)  
+    try:  
+        rid = int(sid)  
+    except:  
+        await q.answer("ত্রুটি: অবৈধ ID।")  
+        return  
+
+    rec = load_from_cache(rid)  
+    if not rec:  
+        await q.message.reply_text("রেজাল্ট পাওয়া যায়নি (সম্ভবত পুরোনো)।")  
+        return  
+
+    videos = rec["videos"]  
+    url = rec["url"]  
+
+    if not videos:  
+        await q.message.reply_text(f"কোন ভিডিও পাওয়া যায়নি\nSource: `{url}`", parse_mode='Markdown')  
+        return  
+
+    await q.message.reply_text(f"📹 মোট {len(videos)}টি ভিডিও/এমবেড লিংক পাওয়া গেছে:")  
+
+    max_messages = 50 # Limit to prevent spam  
+    for i, v in enumerate(videos, start=1):  
+        if i > max_messages:  
+            await q.message.reply_text(f"⚠️ প্রথম {max_messages}টি দেখানো হলো।")  
+            break  
+
+        try:  
+            await q.message.reply_text(  
+                f"📹 লিংক {i}\n{v}",  
+                parse_mode='Markdown',  
+                disable_web_page_preview=False # Show a preview if available  
+            )  
+            await asyncio.sleep(0.5) # Throttle messages  
+        except Exception as e:  
+            logger.error(f"Failed to send link: {e}")  
+            pass # Continue to the next link
+
+async def manual_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# if non-command message and looks like URL, auto-process
+text = update.message.text.strip()
+if text.startswith("http://") or text.startswith("https://"):
+# reuse fetch logic
+context.args = [text]
+await fetch_cmd(update, context)
+else:
+await update.message.reply_text("Blogger/ওয়েবসাইট লিংক পাঠান।")
+
+async def main():
+if not BOT_TOKEN or not ADMIN_CHAT_ID:
+print("BOT_TOKEN এবং ADMIN_CHAT_ID এনভায়রনমেন্ট ভেরিয়েবলে সেট করুন।")
+return
+
+app = ApplicationBuilder().token(BOT_TOKEN).build()  
+  
+app.add_handler(CommandHandler("start", start_cmd))  
+app.add_handler(CommandHandler("fetch", fetch_cmd))  
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_to_admin))  
+app.add_handler(CallbackQueryHandler(callback_handler))  
+
+print("Bot started...")  
+await app.run_polling()
+
+if name == "main":
+import asyncio
+try:
+asyncio.run(main())
+except KeyboardInterrupt:
+print("Bot stopped by user.")    for x in seq:
         if x and x not in seen:
             seen.add(x)
             out.append(x)
