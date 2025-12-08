@@ -28,7 +28,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")      # BotFather token
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # আপনার টেলিগ্রাম আইডি (admin)
 if BOT_TOKEN is None:
     logging.error("BOT_TOKEN is not set in environment variables.")
-    raise ValueError("BOT_TOKEN is missing")
+    # Production environment check - useful for Render
+    # raise ValueError("BOT_TOKEN is missing") 
 
 # টেলিগ্রাম বড় ফাইল লিমিট (প্রাসঙ্গিক নাও হতে পারে)
 TELEGRAM_MAX_FILESIZE = 50 * 1024 * 1024  # 50 MB (approx)
@@ -496,5 +497,4 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("রেজাল্ট পাওয়া যায়নি (সম্ভবত পুরোনো)।")
             return
 
-        vids = rec.get("verified_videos", [])
-        source_url = rec.get("url"
+        vids = rec.get
